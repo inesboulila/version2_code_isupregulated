@@ -45,11 +45,10 @@ with st.form("mirna_form"):
         cell_type = st.selectbox("Cell Type", ["PBMC", "THP-1", "BMDM", "RAW 264.7", "HMDM"])
         time_hours = st.number_input("Time (Hours)", min_value=1, value=12)
         
-        # HIDE INFECTION for Codes 1-9
         if v_num == 10:
             inf_display = st.selectbox("Infection Type", ["In Vitro", "Naturally Infected"])
         else:
-            inf_display = "In Vitro" # Default hidden value
+            inf_display = "In Vitro"
 
     submit = st.form_submit_button("Predict Result")
 
@@ -59,7 +58,7 @@ if submit:
         model_path = f"model_code_{v_num}.pkl"
         loaded_obj = joblib.load(model_path)
         
-        # Normalize inputs
+        # Standardize Inputs
         p_clean = mirna_raw.lower().strip()
         p_blind = strip_prefix(p_clean)
         para = clean_text(parasite)
@@ -67,69 +66,87 @@ if submit:
         org = organism.lower()
         org_num = 1 if org == "human" else 0
         inf = "naturallyinfected" if inf_display == "Naturally Infected" else "invitro"
+        
+        # Mapping for Scenarios
+        scenario = f"{para}_{cell}"
+        super_scenario = f"{para}_{cell}_{org}"
 
-        # BUILD THE DATAFRAME
+        # --- DYNAMIC DATAFRAME CONSTRUCTION ---
+        # We now ensure EVERY column used in training is present to avoid "Not in Index" errors
+        
         if v_num == 10:
             input_df = pd.DataFrame({
                 'microrna': [p_blind], 'microrna_group_simplified': [p_blind],
-                'super_scenario': [f"{para}_{cell}_{org}"], 'infection': [inf], 'time': [time_hours]
+                'super_scenario': [super_scenario], 'infection': [inf], 'time': [time_hours]
             })
         
         elif v_num in [8, 9]:
             name = p_blind if v_num == 9 else p_clean
             input_df = pd.DataFrame({
                 'microrna': [name], 'microrna_group_simplified': [name],
-                'scenario': [f"{para}_{cell}"], 'organism_num': [org_num], 'time': [time_hours]
+                'scenario': [scenario], 'organism_num': [float(org_num)], 'time': [time_hours]
             })
 
         elif v_num in [6, 7]:
             input_df = pd.DataFrame({
                 'microrna': [p_clean], 'microrna_group_simplified': [p_clean],
-                'scenario': [f"{para}_{cell}"], 'organism': [float(org_num)], 'time_bin': [get_time_bin(time_hours)]
+                'scenario': [scenario], 'organism': [float(org_num)], 'time_bin': [get_time_bin(time_hours)]
             })
 
         elif v_num == 5:
-            # Code 5 trained on ONLY 3 columns (Encoded Name, Group, Scenario)
-            # Organism and Time were NOT part of the model input
+            # Re-including Organism and Time because the error proved they are required
             input_df = pd.DataFrame({
                 'microrna': [p_clean], 'microrna_group_simplified': [p_clean],
-                'scenario': [f"{para}_{cell}"]
+                'scenario': [scenario], 'organism': [float(org_num)], 'time': [time_hours]
             })
 
         elif v_num == 1:
-            # Code 1 trained on ONLY 2 columns (Encoded Name and Group)
+            # Re-including all baseline features to match the expected index
             input_df = pd.DataFrame({
-                'microrna': [p_clean], 'microrna_group_simplified': [p_clean]
+                'microrna': [p_clean], 'microrna_group_simplified': [p_clean],
+                'parasite': [para], 'cell type': [cell], 
+                'organism': [float(org_num)], 'time': [time_hours]
             })
 
         elif v_num in [2, 3, 4]:
             input_df = pd.DataFrame({
                 'microrna': [p_clean], 'microrna_group_simplified': [p_clean],
-                'parasite': [para], 'cell type': [cell], 'organism': [float(org_num)], 'time': [time_hours]
+                'parasite': [para], 'cell type': [cell], 
+                'organism': [float(org_num)], 'time': [time_hours]
             })
 
-        # EXECUTION
+        # --- EXECUTION ---
         if isinstance(loaded_obj, dict):
-            # For Codes 1, 5, 6
+            # Manual Codes (1, 5, 6)
             enc = loaded_obj['encoder']
             mdl = loaded_obj['model']
             
-            # Encoder needs the columns it was trained on
-            # We add dummy columns just for the encoder to run, then drop them
+            # 1. Transform text via encoder
             X_encoded = enc.transform(input_df)
             
-            # Ensure we only send the features the model expects
+            # 2. Fix for Code 1 One-Hot columns (parasite_l.donovani, etc.)
+            # If the encoder was TargetEncoder but the model expects One-Hot dummies,
+            # we must ensure the dummy columns exist.
+            if v_num == 1 and not any("_" in col for col in X_encoded.columns):
+                 # This handles cases where Code 1 was trained with get_dummies
+                 X_encoded = pd.get_dummies(input_df, columns=['parasite', 'cell type'])
+                 # Re-align with model features
+                 for col in mdl.feature_names_in_:
+                     if col not in X_encoded.columns:
+                         X_encoded[col] = 0
+            
+            # 3. Final alignment: Ensure only the exact features the model wants are sent
             if hasattr(mdl, "feature_names_in_"):
                 X_encoded = X_encoded[mdl.feature_names_in_]
             
             prediction = mdl.predict(X_encoded)[0]
             probability = mdl.predict_proba(X_encoded)[0][1]
         else:
-            # For Pipelines 2, 3, 4, 7, 8, 9, 10
+            # Pipelines (2, 3, 4, 7, 8, 9, 10) handle their own internal column logic
             prediction = loaded_obj.predict(input_df)[0]
             probability = loaded_obj.predict_proba(input_df)[0][1]
 
-        # --- 5. RESULTS DISPLAY ---
+        # --- RESULTS DISPLAY ---
         st.divider()
         res_col1, res_col2 = st.columns(2)
         with res_col1:
@@ -142,5 +159,6 @@ if submit:
     except Exception as e:
         st.error(f"Prediction Error: {e}")
         with st.expander("Technical Log"):
-            st.write("Columns Sent:", input_df.columns.tolist())
-            st.write("Expected by model:", loaded_obj['model'].feature_names_in_ if isinstance(loaded_obj, dict) else "Pipeline handles logic")
+            st.write("Current Input Columns:", input_df.columns.tolist())
+            if 'loaded_obj' in locals() and isinstance(loaded_obj, dict):
+                st.write("Model Expected Columns:", loaded_obj['model'].feature_names_in_)
