@@ -8,7 +8,140 @@ import xgboost as xgb
 
 st.set_page_config(page_title="miRNA Predictor", layout="wide", page_icon="🧬")
 
+# --- HELPERS ---aimport streamlit as st
+import pandas as pd
+import joblib
+import re
+import numpy as np
+import category_encoders
+import xgboost as xgb
+
+st.set_page_config(page_title="miRNA Prediction Evolution", layout="wide", page_icon="🧬")
+
 # --- HELPERS ---
+def strip_prefix(name):
+    return re.sub(r'^[a-z]{3}-', '', str(name).lower().strip())
+
+def get_time_bin(hours):
+    if hours <= 7: return 'early'
+    if hours <= 13: return 'mid'
+    return 'late'
+
+def clean_text(text):
+    return str(text).lower().replace(" ", "").strip()
+
+# --- SIDEBAR ---
+v_choice = st.sidebar.selectbox("Select Research Version", [f"Code {i}" for i in range(1, 11)], index=9)
+v_num = int(v_choice.split(" ")[1])
+
+# --- INPUT UI ---
+st.title(f"🧬 miRNA Upregulation Predictor")
+st.write(f"Testing Model Architecture: **{v_choice}**")
+
+with st.form("mirna_form"):
+    c1, c2 = st.columns(2)
+    with c1:
+        mirna_raw = st.text_input("miRNA Name", "hsa-mir-21-5p")
+        organism = st.selectbox("Organism", ["Human", "Mouse", "Dog"])
+        parasite = st.selectbox("Parasite", ["L. donovani", "L. major", "L. infantum", "L. amazonensis"])
+    with c2:
+        cell_type = st.selectbox("Cell Type", ["PBMC", "THP-1", "BMDM", "RAW 264.7", "HMDM"])
+        time_hours = st.number_input("Time (Hours)", min_value=1, value=12)
+        if v_num == 10:
+            inf_display = st.selectbox("Infection Type", ["In Vitro", "Naturally Infected"])
+        else:
+            inf_display = "In Vitro"
+    submit = st.form_submit_button("Run Prediction")
+
+# --- THE FEATURE REGISTRY (The fix for your dimension errors) ---
+# This tells the app EXACTLY which columns to send to each model version.
+FEATURE_REGISTRY = {
+    1:  ['microrna', 'microrna_group_simplified'],
+    2:  ['microrna', 'microrna_group_simplified', 'parasite', 'cell type', 'organism', 'time'],
+    3:  ['microrna', 'microrna_group_simplified', 'parasite', 'cell type', 'organism', 'time'],
+    4:  ['microrna', 'microrna_group_simplified', 'parasite', 'cell type', 'organism', 'time'],
+    5:  ['microrna', 'microrna_group_simplified', 'scenario'],
+    6:  ['microrna', 'microrna_group_simplified', 'scenario', 'organism', 'time_bin'],
+    7:  ['microrna', 'microrna_group_simplified', 'scenario', 'organism_num', 'time_bin'],
+    8:  ['microrna', 'microrna_group_simplified', 'scenario', 'organism_num', 'time'],
+    9:  ['microrna', 'microrna_group_simplified', 'scenario', 'organism_num', 'time'],
+    10: ['microrna', 'microrna_group_simplified', 'super_scenario', 'infection', 'time']
+}
+
+if submit:
+    try:
+        model_path = f"model_code_{v_num}.pkl"
+        loaded_obj = joblib.load(model_path)
+        
+        # 1. PROCESS ALL RAW VALUES
+        p_clean = mirna_raw.lower().strip()
+        p_blind = strip_prefix(p_clean)
+        para = clean_text(parasite)
+        cell = clean_text(cell_type)
+        org_text = organism.lower()
+        org_num = 1 if org_text == "human" else 0
+        inf_text = "naturallyinfected" if inf_display == "Naturally Infected" else "invitro"
+        
+        # 2. CREATE MASTER DATA DICTIONARY
+        # We define every possible name the model might want
+        master_data = {
+            'microrna': p_blind if v_num >= 9 else p_clean,
+            'microrna_group_simplified': p_blind if v_num >= 9 else p_clean,
+            'parasite': para,
+            'cell type': cell,
+            'organism': org_text if v_num <= 4 else float(org_num),
+            'organism_num': float(org_num),
+            'time': float(time_hours),
+            'infection': inf_text,
+            'scenario': f"{para}_{cell}",
+            'super_scenario': f"{para}_{cell}_{org_text}",
+            'time_bin': get_time_bin(time_hours)
+        }
+
+        # 3. SELECT ONLY THE REGISTRY COLUMNS FOR THIS VERSION
+        required_cols = FEATURE_REGISTRY[v_num]
+        input_df = pd.DataFrame({col: [master_data[col]] for col in required_cols})
+
+        # 4. PREDICTION ENGINE
+        if isinstance(loaded_obj, dict):
+            # For Manual Dictionary Models (1, 5, 6)
+            enc = loaded_obj['encoder']
+            mdl = loaded_obj['model']
+            
+            # Encoder transforms the data
+            X_encoded = enc.transform(input_df)
+            
+            # CRITICAL: Ensure the numeric columns are in the EXACT order the model expects
+            if hasattr(mdl, "feature_names_in_"):
+                X_encoded = X_encoded[mdl.feature_names_in_]
+            
+            prediction = mdl.predict(X_encoded)[0]
+            probability = mdl.predict_proba(X_encoded)[0][1]
+        else:
+            # For Pipeline Models (2, 3, 4, 7, 8, 9, 10)
+            prediction = loaded_obj.predict(input_df)[0]
+            probability = loaded_obj.predict_proba(input_df)[0][1]
+
+        # 5. DISPLAY RESULTS
+        st.divider()
+        res_col1, res_col2 = st.columns(2)
+        with res_col1:
+            if prediction == 1:
+                st.success(f"### RESULT: UPREGULATED")
+            else:
+                st.error(f"### RESULT: DOWNREGULATED")
+        
+        with res_col2:
+            st.metric("Confidence Level", f"{probability*100:.1f}%")
+            st.progress(float(probability))
+        
+        with st.expander("Technical Verification"):
+            st.write(f"Model used: `{model_path}`")
+            st.write("Columns sent to AI:", input_df.columns.tolist())
+
+    except Exception as e:
+        st.error(f"Prediction Error: {e}")
+        st.info("If this is a 'KeyError', it means a column name in the app doesn't match your Jupyter code.")
 def strip_prefix(name):
     return re.sub(r'^[a-z]{3}-', '', str(name).lower().strip())
 
@@ -134,3 +267,4 @@ if submit:
             else:
                 st.write("Pipeline Expected Columns:", list(loaded_obj.feature_names_in_))
             st.write("Columns App Sent:", X_encoded.columns.tolist() if 'X_encoded' in locals() else input_df.columns.tolist())
+
