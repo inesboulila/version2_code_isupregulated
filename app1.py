@@ -89,24 +89,31 @@ if submit:
             })
 
         elif v_num == 5:
-            # FIX: Code 5 encoder was trained on 3 categorical cols + organism + time.
-            # We must pass all 5 columns to the encoder, then select the right features for the model.
+            # Code 5: encoder was fitted on ONLY 3 cols (microrna, microrna_group_simplified, scenario)
+            # organism and time were already numeric in X_c5 and added separately AFTER encoding.
+            # The XGBoost model expects exactly 3 features: the 3 target-encoded columns.
             enc = loaded_obj['encoder']
             mdl = loaded_obj['model']
 
-            input_df = pd.DataFrame({
+            # Step 1: Build the 3-column categorical DataFrame for the encoder
+            cat_df = pd.DataFrame({
                 'microrna': [p_clean],
                 'microrna_group_simplified': [p_clean],
-                'scenario': [f"{para}_{cell}"],
-                'organism': [float(org_num)],
-                'time': [float(time_hours)]
+                'scenario': [f"{para}_{cell}"]
             })
 
-            # Encode only the categorical columns (encoder knows which cols to touch)
-            X_encoded = enc.transform(input_df)
+            # Step 2: Transform through encoder (outputs 3 float columns)
+            X_encoded = enc.transform(cat_df)
 
-            # Select only the columns the model was actually trained on
-            # Code 5 model was trained on X_c5 which had exactly these 5 columns
+            # Step 3: Check how many features the model actually expects
+            # If model expects 3, use only encoded cols; if 5, append organism + time
+            n_expected = mdl.n_features_in_ if hasattr(mdl, 'n_features_in_') else X_encoded.shape[1]
+
+            if n_expected == 5:
+                X_encoded['organism'] = float(org_num)
+                X_encoded['time'] = float(time_hours)
+            # else n_expected == 3, use X_encoded as-is
+
             prediction = mdl.predict(X_encoded)[0]
             probability = mdl.predict_proba(X_encoded)[0][1]
 
