@@ -6,19 +6,9 @@ import numpy as np
 import category_encoders
 import xgboost as xgb
 
-st.set_page_config(page_title="miRNA Predictor", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="miRNA Evolution Lab", layout="wide", page_icon="🧬")
 
-# --- HELPERS ---aimport streamlit as st
-import pandas as pd
-import joblib
-import re
-import numpy as np
-import category_encoders
-import xgboost as xgb
-
-st.set_page_config(page_title="miRNA Prediction Evolution", layout="wide", page_icon="🧬")
-
-# --- HELPERS ---
+# --- 1. HELPERS ---
 def strip_prefix(name):
     return re.sub(r'^[a-z]{3}-', '', str(name).lower().strip())
 
@@ -30,14 +20,13 @@ def get_time_bin(hours):
 def clean_text(text):
     return str(text).lower().replace(" ", "").strip()
 
-# --- SIDEBAR ---
-v_choice = st.sidebar.selectbox("Select Research Version", [f"Code {i}" for i in range(1, 11)], index=9)
+# --- 2. SIDEBAR ---
+st.sidebar.title("🚀 Model Selector")
+v_choice = st.sidebar.selectbox("Select Version", [f"Code {i}" for i in range(1, 11)], index=9)
 v_num = int(v_choice.split(" ")[1])
 
-# --- INPUT UI ---
-st.title(f"🧬 miRNA Upregulation Predictor")
-st.write(f"Testing Model Architecture: **{v_choice}**")
-
+# --- 3. INPUT UI ---
+st.title(f"🧬 miRNA Prediction interface")
 with st.form("mirna_form"):
     c1, c2 = st.columns(2)
     with c1:
@@ -47,224 +36,115 @@ with st.form("mirna_form"):
     with c2:
         cell_type = st.selectbox("Cell Type", ["PBMC", "THP-1", "BMDM", "RAW 264.7", "HMDM"])
         time_hours = st.number_input("Time (Hours)", min_value=1, value=12)
-        if v_num == 10:
-            inf_display = st.selectbox("Infection Type", ["In Vitro", "Naturally Infected"])
-        else:
-            inf_display = "In Vitro"
-    submit = st.form_submit_button("Run Prediction")
+        inf_display = st.selectbox("Infection Type", ["In Vitro", "Naturally Infected"])
+    submit = st.form_submit_button("Predict Result")
 
-# --- THE FEATURE REGISTRY (The fix for your dimension errors) ---
-# This tells the app EXACTLY which columns to send to each model version.
-FEATURE_REGISTRY = {
-    1:  ['microrna', 'microrna_group_simplified'],
-    2:  ['microrna', 'microrna_group_simplified', 'parasite', 'cell type', 'organism', 'time'],
-    3:  ['microrna', 'microrna_group_simplified', 'parasite', 'cell type', 'organism', 'time'],
-    4:  ['microrna', 'microrna_group_simplified', 'parasite', 'cell type', 'organism', 'time'],
-    5:  ['microrna', 'microrna_group_simplified', 'scenario'],
-    6:  ['microrna', 'microrna_group_simplified', 'scenario', 'organism', 'time_bin'],
-    7:  ['microrna', 'microrna_group_simplified', 'scenario', 'organism_num', 'time_bin'],
-    8:  ['microrna', 'microrna_group_simplified', 'scenario', 'organism_num', 'time'],
-    9:  ['microrna', 'microrna_group_simplified', 'scenario', 'organism_num', 'time'],
-    10: ['microrna', 'microrna_group_simplified', 'super_scenario', 'infection', 'time']
-}
-
+# --- 4. THE SELF-HEALING ENGINE ---
 if submit:
     try:
         model_path = f"model_code_{v_num}.pkl"
         loaded_obj = joblib.load(model_path)
         
-        # 1. PROCESS ALL RAW VALUES
-        p_clean = mirna_raw.lower().strip()
-        p_blind = strip_prefix(p_clean)
-        para = clean_text(parasite)
-        cell = clean_text(cell_type)
-        org_text = organism.lower()
-        org_num = 1 if org_text == "human" else 0
-        inf_text = "naturallyinfected" if inf_display == "Naturally Infected" else "invitro"
-        
-        # 2. CREATE MASTER DATA DICTIONARY
-        # We define every possible name the model might want
-        master_data = {
-            'microrna': p_blind if v_num >= 9 else p_clean,
-            'microrna_group_simplified': p_blind if v_num >= 9 else p_clean,
-            'parasite': para,
-            'cell type': cell,
-            'organism': org_text if v_num <= 4 else float(org_num),
-            'organism_num': float(org_num),
-            'time': float(time_hours),
-            'infection': inf_text,
-            'scenario': f"{para}_{cell}",
-            'super_scenario': f"{para}_{cell}_{org_text}",
-            'time_bin': get_time_bin(time_hours)
-        }
-
-        # 3. SELECT ONLY THE REGISTRY COLUMNS FOR THIS VERSION
-        required_cols = FEATURE_REGISTRY[v_num]
-        input_df = pd.DataFrame({col: [master_data[col]] for col in required_cols})
-
-        # 4. PREDICTION ENGINE
-        if isinstance(loaded_obj, dict):
-            # For Manual Dictionary Models (1, 5, 6)
-            enc = loaded_obj['encoder']
-            mdl = loaded_obj['model']
-            
-            # Encoder transforms the data
-            X_encoded = enc.transform(input_df)
-            
-            # CRITICAL: Ensure the numeric columns are in the EXACT order the model expects
-            if hasattr(mdl, "feature_names_in_"):
-                X_encoded = X_encoded[mdl.feature_names_in_]
-            
-            prediction = mdl.predict(X_encoded)[0]
-            probability = mdl.predict_proba(X_encoded)[0][1]
-        else:
-            # For Pipeline Models (2, 3, 4, 7, 8, 9, 10)
-            prediction = loaded_obj.predict(input_df)[0]
-            probability = loaded_obj.predict_proba(input_df)[0][1]
-
-        # 5. DISPLAY RESULTS
-        st.divider()
-        res_col1, res_col2 = st.columns(2)
-        with res_col1:
-            if prediction == 1:
-                st.success(f"### RESULT: UPREGULATED")
-            else:
-                st.error(f"### RESULT: DOWNREGULATED")
-        
-        with res_col2:
-            st.metric("Confidence Level", f"{probability*100:.1f}%")
-            st.progress(float(probability))
-        
-        with st.expander("Technical Verification"):
-            st.write(f"Model used: `{model_path}`")
-            st.write("Columns sent to AI:", input_df.columns.tolist())
-
-    except Exception as e:
-        st.error(f"Prediction Error: {e}")
-        st.info("If this is a 'KeyError', it means a column name in the app doesn't match your Jupyter code.")
-def strip_prefix(name):
-    return re.sub(r'^[a-z]{3}-', '', str(name).lower().strip())
-
-def get_time_bin(hours):
-    if hours <= 7: return 'early'
-    if hours <= 13: return 'mid'
-    return 'late'
-
-def clean_text(text):
-    return str(text).lower().replace(" ", "").strip()
-
-# --- SIDEBAR ---
-v_choice = st.sidebar.selectbox("Select Research Version", [f"Code {i}" for i in range(1, 11)], index=9)
-v_num = int(v_choice.split(" ")[1])
-
-# --- DYNAMIC UI ---
-st.title(f"🧬 miRNA Prediction")
-with st.form("mirna_form"):
-    c1, c2 = st.columns(2)
-    with c1:
-        mirna_raw = st.text_input("miRNA Name", "hsa-mir-21-5p")
-        organism = st.selectbox("Organism", ["Human", "Mouse", "Dog"])
-        parasite = st.selectbox("Parasite", ["L. donovani", "L. major", "L. infantum", "L. amazonensis"])
-    with c2:
-        cell_type = st.selectbox("Cell Type", ["PBMC", "THP-1", "BMDM", "RAW 264.7", "HMDM"])
-        time_hours = st.number_input("Time (Hours)", min_value=1, value=12)
-        if v_num == 10:
-            inf_display = st.selectbox("Infection Type", ["In Vitro", "Naturally Infected"])
-        else:
-            inf_display = "In Vitro"
-    submit = st.form_submit_button("Predict")
-
-if submit:
-    try:
-        model_path = f"model_code_{v_num}.pkl"
-        loaded_obj = joblib.load(model_path)
-        
-        # 1. PREPARE RAW DATA
+        # A. PREPARE RAW PIECES
         p_clean = mirna_raw.lower().strip()
         p_blind = strip_prefix(p_clean)
         para = clean_text(parasite)
         cell = clean_text(cell_type)
         org = organism.lower()
-        org_num = 1 if org == "human" else 0
+        org_num = 1.0 if org == "human" else 0.0
+        if org == "dog": org_num = 2.0
         inf = "naturallyinfected" if inf_display == "Naturally Infected" else "invitro"
-        
-        # 2. CREATE EVERY POSSIBLE COLUMN NAME COMBINATION
-        # We create a huge dictionary so no matter what the model wants, we have it
-        data_map = {
+
+        # B. THE "SUPER-DATAFRAME"
+        # We include EVERY variation of every column name we used in the 10 codes.
+        # If Code 1 wants 'parasite' and Code 9 wants 'scenario', we provide BOTH.
+        master_dict = {
+            # MicroRNA variations
             'microrna': p_blind if v_num >= 9 else p_clean,
             'microrna_group_simplified': p_blind if v_num >= 9 else p_clean,
+            'miRNA': p_blind if v_num >= 9 else p_clean, # In case you capitalized it
+            
+            # Context variations
             'parasite': para,
             'cell type': cell,
-            'organism': float(org_num),
-            'organism_num': float(org_num),
-            'time': float(time_hours),
+            'cell_type': cell,
+            'organism': org if v_num <= 4 else org_num, # Text for early, Numeric for late
+            'organism_num': org_num,
             'infection': inf,
+            'time': float(time_hours),
+            'time_bin': get_time_bin(time_hours),
+            
+            # Scenario variations
             'scenario': f"{para}_{cell}",
-            'super_scenario': f"{para}_{cell}_{org}",
-            'time_bin': get_time_bin(time_hours)
+            'super_scenario': f"{para}_{cell}_{org}"
         }
         
-        input_df = pd.DataFrame([data_map])
+        full_input_df = pd.DataFrame([master_dict])
 
-        # 3. PREDICTION ENGINE
+        # C. THE AUTOMATIC FILTER
+        # This part asks the model: "What columns do you want?" and gives it ONLY those.
         if isinstance(loaded_obj, dict):
-            # For Manual Models (1, 5, 6)
-            enc = loaded_obj['encoder']
-            mdl = loaded_obj['model']
+            # Manual Codes (1, 5, 6, 7)
+            encoder = loaded_obj['encoder']
+            model = loaded_obj['model']
             
-            # Step A: Transform using encoder
-            # (Encoder will only transform columns it recognizes)
-            X_encoded = enc.transform(input_df)
+            # 1. Let the encoder transform the super-dataframe
+            # (Encoder will ignore columns it wasn't fitted on)
+            X_encoded = encoder.transform(full_input_df)
             
-            # Step B: HANDLE ONE-HOT DUMMIES (The fix for your Code 1 screenshot)
-            # If the model wants things like 'parasite_l.major', we must create them
-            if v_num == 1:
-                # Re-create dummies for parasite and cell type
-                dummies = pd.get_dummies(input_df, columns=['parasite', 'cell type'])
-                # Merge dummies with the encoded columns
-                X_encoded = pd.concat([X_encoded, dummies.drop(columns=enc.cols, errors='ignore')], axis=1)
+            # 2. Re-add numeric columns that encoder might have skipped
+            X_encoded['organism'] = org_num
+            X_encoded['organism_num'] = org_num
+            X_encoded['time'] = float(time_hours)
 
-            # Step C: CRITICAL DIMENSION FIX
-            # We force X_encoded to have ONLY the columns the model was trained on
-            # This fixes "Expected 2, got 6" and "Expected 3, got 5"
-            if hasattr(mdl, "feature_names_in_"):
-                expected = list(mdl.feature_names_in_)
-                # Fill missing columns with 0 (like rare cell types)
-                for col in expected:
+            # 3. IF Code 1 expects One-Hot columns (parasite_l.major), we generate them
+            if v_num == 1:
+                one_hot_parts = pd.get_dummies(full_input_df[['parasite', 'cell type']])
+                X_encoded = pd.concat([X_encoded, one_hot_parts], axis=1)
+
+            # 4. FILTER: Look at 'feature_names_in_' of the model
+            if hasattr(model, "feature_names_in_"):
+                expected_features = list(model.feature_names_in_)
+                # Fill any missing one-hot columns with 0
+                for col in expected_features:
                     if col not in X_encoded.columns:
                         X_encoded[col] = 0.0
-                # Filter and reorder exactly
-                X_encoded = X_encoded[expected]
-                
-            prediction = mdl.predict(X_encoded)[0]
-            probability = mdl.predict_proba(X_encoded)[0][1]
-        else:
-            # For Pipelines (2, 3, 4, 7, 8, 9, 10)
-            # We must still ensure column names match the Pipeline's feature_names_in_
-            expected = list(loaded_obj.feature_names_in_)
-            # Sub-select only the columns this pipeline needs
-            pipeline_input = input_df[expected]
-            
-            prediction = loaded_obj.predict(pipeline_input)[0]
-            probability = loaded_obj.predict_proba(pipeline_input)[0][1]
+                # Select and Reorder
+                X_final = X_encoded[expected_features]
+            else:
+                X_final = X_encoded
 
-        # 4. RESULTS
+            prediction = model.predict(X_final)[0]
+            probability = model.predict_proba(X_final)[0][1]
+            
+        else:
+            # Pipeline Codes (2, 3, 4, 8, 9, 10)
+            # Pipelines are smarter. We just filter to what it expects.
+            if hasattr(loaded_obj, "feature_names_in_"):
+                expected_features = list(loaded_obj.feature_names_in_)
+                X_final = full_input_df[expected_features]
+            else:
+                X_final = full_input_df
+                
+            prediction = loaded_obj.predict(X_final)[0]
+            probability = loaded_obj.predict_proba(X_final)[0][1]
+
+        # D. SHOW RESULTS
         st.divider()
         res_col1, res_col2 = st.columns(2)
         with res_col1:
-            if prediction == 1: st.success("### RESULT: UPREGULATED")
-            else: st.error("### RESULT: DOWNREGULATED")
+            if prediction == 1: st.success("### Prediction: UPREGULATED")
+            else: st.error("### Prediction: DOWNREGULATED")
         with res_col2:
-            st.metric("Confidence Level", f"{probability*100:.1f}%")
+            st.metric("Confidence Score", f"{probability*100:.1f}%")
             st.progress(float(probability))
 
     except Exception as e:
         st.error(f"Prediction Error: {e}")
-        with st.expander("Technical Debugging Info"):
-            st.write("Model Type:", "Dictionary" if isinstance(loaded_obj, dict) else "Pipeline")
-            if isinstance(loaded_obj, dict):
-                st.write("Model Expected Columns:", list(loaded_obj['model'].feature_names_in_))
-            else:
-                st.write("Pipeline Expected Columns:", list(loaded_obj.feature_names_in_))
-            st.write("Columns App Sent:", X_encoded.columns.tolist() if 'X_encoded' in locals() else input_df.columns.tolist())
-
+        with st.expander("Show Logic Breakdown (Debug)"):
+            st.write("Model type:", "Manual Dict" if isinstance(loaded_obj, dict) else "Pipeline")
+            try:
+                st.write("Columns the model is looking for:", list(model.feature_names_in_) if isinstance(loaded_obj, dict) else list(loaded_obj.feature_names_in_))
+            except:
+                st.write("Could not detect model feature names.")
+            st.write("Data sent to predictor:", X_final if 'X_final' in locals() else "None")
