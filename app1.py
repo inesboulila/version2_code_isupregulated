@@ -89,18 +89,75 @@ if submit:
             })
 
         elif v_num == 5:
-            # Code 5 trained on ONLY 3 columns (Encoded Name, Group, Scenario)
-            # Organism and Time were NOT part of the model input
+            # FIX: Code 5 encoder was trained on 3 categorical cols + organism + time.
+            # We must pass all 5 columns to the encoder, then select the right features for the model.
+            enc = loaded_obj['encoder']
+            mdl = loaded_obj['model']
+
             input_df = pd.DataFrame({
-                'microrna': [p_clean], 'microrna_group_simplified': [p_clean],
-                'scenario': [f"{para}_{cell}"]
+                'microrna': [p_clean],
+                'microrna_group_simplified': [p_clean],
+                'scenario': [f"{para}_{cell}"],
+                'organism': [float(org_num)],
+                'time': [float(time_hours)]
             })
 
+            # Encode only the categorical columns (encoder knows which cols to touch)
+            X_encoded = enc.transform(input_df)
+
+            # Select only the columns the model was actually trained on
+            # Code 5 model was trained on X_c5 which had exactly these 5 columns
+            prediction = mdl.predict(X_encoded)[0]
+            probability = mdl.predict_proba(X_encoded)[0][1]
+
+            # Skip the generic execution block below
+            input_df = None
+
         elif v_num == 1:
-            # Code 1 trained on ONLY 2 columns (Encoded Name and Group)
-            input_df = pd.DataFrame({
-                'microrna': [p_clean], 'microrna_group_simplified': [p_clean]
+            # FIX: Code 1 used manual one-hot encoding on parasite + cell type,
+            # then target-encoded microrna + microrna_group_simplified.
+            # We must reconstruct the full encoded row manually.
+            enc = loaded_obj['encoder']
+            mdl = loaded_obj['model']
+
+            # Get the exact column list the model was trained on
+            trained_cols = list(mdl.feature_names_in_)
+
+            # Build a zero-row matching all trained columns
+            input_row = {col: [0] for col in trained_cols}
+
+            # Fill target-encoded columns via the encoder
+            mirna_df = pd.DataFrame({
+                'microrna': [p_clean],
+                'microrna_group_simplified': [p_clean]
             })
+            mirna_encoded = enc.transform(mirna_df)
+            input_row['microrna'] = [mirna_encoded['microrna'].iloc[0]]
+            input_row['microrna_group_simplified'] = [mirna_encoded['microrna_group_simplified'].iloc[0]]
+
+            # Fill organism and time directly
+            if 'organism' in input_row:
+                input_row['organism'] = [float(org_num)]
+            if 'time' in input_row:
+                input_row['time'] = [float(time_hours)]
+
+            # Fill one-hot parasite column (e.g. parasite_l.donovani)
+            para_col = f"parasite_{para}"
+            if para_col in input_row:
+                input_row[para_col] = [1]
+
+            # Fill one-hot cell type column (e.g. cell type_pbmc)
+            cell_col = f"cell type_{cell}"
+            if cell_col in input_row:
+                input_row[cell_col] = [1]
+
+            X_encoded = pd.DataFrame(input_row)[trained_cols]
+
+            prediction = mdl.predict(X_encoded)[0]
+            probability = mdl.predict_proba(X_encoded)[0][1]
+
+            # Skip the generic execution block below
+            input_df = None
 
         elif v_num in [2, 3, 4]:
             input_df = pd.DataFrame({
@@ -108,26 +165,19 @@ if submit:
                 'parasite': [para], 'cell type': [cell], 'organism': [float(org_num)], 'time': [time_hours]
             })
 
-        # EXECUTION
-        if isinstance(loaded_obj, dict):
-            # For Codes 1, 5, 6
-            enc = loaded_obj['encoder']
-            mdl = loaded_obj['model']
-            
-            # Encoder needs the columns it was trained on
-            # We add dummy columns just for the encoder to run, then drop them
-            X_encoded = enc.transform(input_df)
-            
-            # Ensure we only send the features the model expects
-            if hasattr(mdl, "feature_names_in_"):
-                X_encoded = X_encoded[mdl.feature_names_in_]
-            
-            prediction = mdl.predict(X_encoded)[0]
-            probability = mdl.predict_proba(X_encoded)[0][1]
-        else:
-            # For Pipelines 2, 3, 4, 7, 8, 9, 10
-            prediction = loaded_obj.predict(input_df)[0]
-            probability = loaded_obj.predict_proba(input_df)[0][1]
+        # GENERIC EXECUTION (for pipeline-based models: 2, 3, 4, 6, 7, 8, 9, 10)
+        if input_df is not None:
+            if isinstance(loaded_obj, dict):
+                enc = loaded_obj['encoder']
+                mdl = loaded_obj['model']
+                X_encoded = enc.transform(input_df)
+                if hasattr(mdl, "feature_names_in_"):
+                    X_encoded = X_encoded[mdl.feature_names_in_]
+                prediction = mdl.predict(X_encoded)[0]
+                probability = mdl.predict_proba(X_encoded)[0][1]
+            else:
+                prediction = loaded_obj.predict(input_df)[0]
+                probability = loaded_obj.predict_proba(input_df)[0][1]
 
         # --- 5. RESULTS DISPLAY ---
         st.divider()
@@ -142,5 +192,5 @@ if submit:
     except Exception as e:
         st.error(f"Prediction Error: {e}")
         with st.expander("Technical Log"):
-            st.write("Columns Sent:", input_df.columns.tolist())
-            st.write("Expected by model:", loaded_obj['model'].feature_names_in_ if isinstance(loaded_obj, dict) else "Pipeline handles logic")
+            import traceback
+            st.code(traceback.format_exc())
